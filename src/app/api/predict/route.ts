@@ -17,6 +17,7 @@ export async function POST(request: Request) {
     const image = formData.get("image");
     const conf = parseFloatField(formData.get("conf"), 0.25, 0.01, 0.99);
     const iou = parseFloatField(formData.get("iou"), 0.7, 0.1, 0.95);
+    const imgsz = parseFloatField(formData.get("imgsz"), 768, 300, 1200);
 
     if (!(image instanceof File)) {
       return NextResponse.json({ error: "File image wajib diisi." }, { status: 400 });
@@ -26,11 +27,12 @@ export async function POST(request: Request) {
     const app = await Client.connect("salbiyah/pinang-api");
 
     // Kirim request ke Space
-    // app.py: inputs=[gr.Image, gr.Slider(conf), gr.Slider(iou)]
+    // app.py: inputs=[gr.Image, gr.Slider(conf), gr.Slider(iou), gr.Number(imgsz)]
     const result = await app.predict("/predict", [
       image,
       conf,
       iou,
+      imgsz,
     ]) as any;
 
     if (!result || !result.data) {
