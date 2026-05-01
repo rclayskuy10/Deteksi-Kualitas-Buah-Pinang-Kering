@@ -62,8 +62,9 @@ export async function POST(request: Request) {
         iou,
       },
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Inferensi ke Hugging Face gagal.";
-    return NextResponse.json({ error: message }, { status: 500 });
+  } catch (error: any) {
+    console.error("Gradio Error Details:", error);
+    const message = error?.message || "Inferensi ke Hugging Face gagal.";
+    return NextResponse.json({ error: message, details: String(error) }, { status: 500 });
   }
 }
