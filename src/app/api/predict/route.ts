@@ -47,8 +47,8 @@ export async function POST(request: Request) {
     const imageBuffer = await imageResponse.arrayBuffer();
     const annotatedImage = `data:image/jpeg;base64,${Buffer.from(imageBuffer).toString("base64")}`;
 
-    // Parse JSON
-    const parsedData = JSON.parse(outputJSONString);
+    // Gradio client otomatis mem-parsing gr.JSON menjadi Object JS
+    const parsedData = typeof outputJSONString === "string" ? JSON.parse(outputJSONString) : outputJSONString;
 
     return NextResponse.json({
       detections: parsedData.detections || [],
