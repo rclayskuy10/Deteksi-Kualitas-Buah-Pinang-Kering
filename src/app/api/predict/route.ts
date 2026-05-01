@@ -29,9 +29,9 @@ export async function POST(request: Request) {
     // Sambung ke Hugging Face Space
     const app = await Client.connect("salbiyah/pinang-api");
 
-    // Kirim request ke Space
+    // Kirim request ke Space endpoint baru (/predict_api)
     // app.py: inputs=[gr.Textbox(base64Str), gr.Number(conf), gr.Number(iou), gr.Number(imgsz)]
-    const result = await app.predict("/predict", [
+    const result = await app.predict("/predict_api", [
       base64Str,
       conf,
       iou,
