@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
@@ -112,7 +113,8 @@ export async function POST(request: Request) {
 
     const extension = ".jpg";
     const rootDir = process.cwd();
-    const tempRoot = path.join(rootDir, ".tmp");
+    // Vercel runtime filesystem is read-only except the OS temp directory.
+    const tempRoot = path.join(tmpdir(), "deteksi-pinang");
     const uploadDir = path.join(tempRoot, "uploads");
     const outputDir = path.join(tempRoot, "outputs");
     const id = randomUUID();
