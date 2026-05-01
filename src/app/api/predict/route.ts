@@ -19,17 +19,16 @@ export async function POST(request: Request) {
     const iou = parseFloatField(formData.get("iou"), 0.7, 0.1, 0.95);
     const imgsz = parseFloatField(formData.get("imgsz"), 768, 300, 1200);
 
-    if (!(image instanceof File)) {
-      return NextResponse.json({ error: "File image wajib diisi." }, { status: 400 });
-    }
+    const bytes = await image.arrayBuffer();
+    const base64Str = Buffer.from(bytes).toString("base64");
 
     // Sambung ke Hugging Face Space
     const app = await Client.connect("salbiyah/pinang-api");
 
     // Kirim request ke Space
-    // app.py: inputs=[gr.Image, gr.Slider(conf), gr.Slider(iou), gr.Number(imgsz)]
+    // app.py: inputs=[gr.Textbox(base64Str), gr.Number(conf), gr.Number(iou), gr.Number(imgsz)]
     const result = await app.predict("/predict", [
-      image,
+      base64Str,
       conf,
       iou,
       imgsz,
@@ -39,18 +38,14 @@ export async function POST(request: Request) {
        throw new Error("Hasil dari Hugging Face kosong atau tidak valid.");
     }
 
-    // result.data[0] = Output Gambar dari Gradio (Object URL)
-    // result.data[1] = Output JSON string dari Gradio
-    const outputImageData = result.data[0];
-    const outputJSONString = result.data[1];
-    
-    // Download gambar hasil deteksi dari URL yang diberikan Hugging Face
-    const imageResponse = await fetch(outputImageData.url);
-    const imageBuffer = await imageResponse.arrayBuffer();
-    const annotatedImage = `data:image/jpeg;base64,${Buffer.from(imageBuffer).toString("base64")}`;
-
-    // Gradio client otomatis mem-parsing gr.JSON menjadi Object JS
+    const outputJSONString = result.data[0];
     const parsedData = typeof outputJSONString === "string" ? JSON.parse(outputJSONString) : outputJSONString;
+
+    if (parsedData.python_error) {
+       throw new Error(`[Python Error] ${parsedData.python_error}\nTrace: ${parsedData.trace}`);
+    }
+
+    const annotatedImage = `data:image/jpeg;base64,${parsedData.image_base64}`;
 
     return NextResponse.json({
       detections: parsedData.detections || [],
