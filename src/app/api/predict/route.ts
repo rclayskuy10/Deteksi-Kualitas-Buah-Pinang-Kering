@@ -1,102 +1,14 @@
-import { spawn } from "node:child_process";
-import { promises as fs } from "node:fs";
-import path from "node:path";
-import { tmpdir } from "node:os";
-import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
+import { Client } from "@gradio/client";
 
 export const runtime = "nodejs";
-
-type PythonDetection = {
-  className: string;
-  confidence: number;
-  box: {
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-  };
-};
-
-type PythonResponse = {
-  detections: PythonDetection[];
-  imageWidth: number;
-  imageHeight: number;
-  modelNames: Record<string, string>;
-  classCounts: Record<string, number>;
-};
 
 function parseFloatField(value: FormDataEntryValue | null, fallback: number, min: number, max: number) {
   const parsed = Number.parseFloat(String(value ?? ""));
   if (Number.isNaN(parsed)) {
     return fallback;
   }
-
   return Math.max(min, Math.min(max, parsed));
-}
-
-function parseIntField(value: FormDataEntryValue | null, fallback: number, min: number, max: number) {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
-  if (Number.isNaN(parsed)) {
-    return fallback;
-  }
-
-  return Math.max(min, Math.min(max, parsed));
-}
-
-async function runPythonInference(args: string[]): Promise<PythonResponse> {
-  const workspaceRoot = path.resolve(process.cwd(), "..");
-  const venvPython =
-    process.platform === "win32"
-      ? path.join(workspaceRoot, ".venv", "Scripts", "python.exe")
-      : path.join(workspaceRoot, ".venv", "bin", "python");
-
-  let pythonCommand = process.env.PYTHON_PATH || "python";
-
-  try {
-    await fs.access(venvPython);
-    pythonCommand = venvPython;
-  } catch {
-    // Use PYTHON_PATH or system python when local venv does not exist.
-  }
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(pythonCommand, args, {
-      cwd: process.cwd(),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => {
-      reject(error);
-    });
-
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(
-          new Error(stderr || `Python process exited with code ${code?.toString() ?? "unknown"}.`),
-        );
-        return;
-      }
-
-      try {
-        const parsed = JSON.parse(stdout) as PythonResponse;
-        resolve(parsed);
-      } catch {
-        reject(new Error("Tidak bisa membaca output JSON dari script Python."));
-      }
-    });
-  });
 }
 
 export async function POST(request: Request) {
@@ -105,73 +17,51 @@ export async function POST(request: Request) {
     const image = formData.get("image");
     const conf = parseFloatField(formData.get("conf"), 0.25, 0.01, 0.99);
     const iou = parseFloatField(formData.get("iou"), 0.7, 0.1, 0.95);
-    const imgsz = parseIntField(formData.get("imgsz"), 768, 320, 1280);
 
     if (!(image instanceof File)) {
       return NextResponse.json({ error: "File image wajib diisi." }, { status: 400 });
     }
 
-    const extension = ".jpg";
-    const rootDir = process.cwd();
-    // Vercel runtime filesystem is read-only except the OS temp directory.
-    const tempRoot = path.join(tmpdir(), "deteksi-pinang");
-    const uploadDir = path.join(tempRoot, "uploads");
-    const outputDir = path.join(tempRoot, "outputs");
-    const id = randomUUID();
-    const inputPath = path.join(uploadDir, `${id}${extension}`);
-    const outputPath = path.join(outputDir, `${id}.jpg`);
+    // Sambung ke Hugging Face Space
+    const app = await Client.connect("salbiyah/pinang-api");
 
-    await fs.mkdir(uploadDir, { recursive: true });
-    await fs.mkdir(outputDir, { recursive: true });
+    // Kirim request ke Space
+    // app.py: inputs=[gr.Image, gr.Slider(conf), gr.Slider(iou)]
+    const result = await app.predict("/predict", [
+      image,
+      conf,
+      iou,
+    ]) as any;
 
-    const bytes = await image.arrayBuffer();
-    await fs.writeFile(inputPath, Buffer.from(bytes));
+    if (!result || !result.data) {
+       throw new Error("Hasil dari Hugging Face kosong atau tidak valid.");
+    }
 
-    const defaultModel = path.resolve(
-      /* turbopackIgnore: true */ rootDir,
-      "..",
-      "Model Fix",
-      "weights",
-      "best.pt",
-    );
-    const modelPath = process.env.MODEL_PATH || defaultModel;
-    const scriptPath = path.join(/* turbopackIgnore: true */ rootDir, "python", "predict.py");
+    // result.data[0] = Output Gambar dari Gradio (Object URL)
+    // result.data[1] = Output JSON string dari Gradio
+    const outputImageData = result.data[0];
+    const outputJSONString = result.data[1];
+    
+    // Download gambar hasil deteksi dari URL yang diberikan Hugging Face
+    const imageResponse = await fetch(outputImageData.url);
+    const imageBuffer = await imageResponse.arrayBuffer();
+    const annotatedImage = `data:image/jpeg;base64,${Buffer.from(imageBuffer).toString("base64")}`;
 
-    await fs.access(modelPath);
-
-    const result = await runPythonInference([
-      scriptPath,
-      "--model",
-      modelPath,
-      "--source",
-      inputPath,
-      "--output",
-      outputPath,
-      "--conf",
-      conf.toString(),
-      "--imgsz",
-      imgsz.toString(),
-      "--iou",
-      iou.toString(),
-    ]);
-
-    const outputBuffer = await fs.readFile(outputPath);
-    const annotatedImage = `data:image/jpeg;base64,${outputBuffer.toString("base64")}`;
-
-    await Promise.allSettled([fs.unlink(inputPath), fs.unlink(outputPath)]);
+    // Parse JSON
+    const parsedData = JSON.parse(outputJSONString);
 
     return NextResponse.json({
-      ...result,
+      detections: parsedData.detections || [],
+      classCounts: parsedData.classCounts || {},
+      modelNames: parsedData.modelNames || {},
       annotatedImage,
-      modelPath,
       usedParams: {
         conf,
         iou,
-        imgsz,
       },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Inferensi gagal dijalankan.";
+    const message = error instanceof Error ? error.message : "Inferensi ke Hugging Face gagal.";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
