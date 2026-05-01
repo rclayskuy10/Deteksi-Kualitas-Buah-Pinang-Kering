@@ -19,6 +19,10 @@ export async function POST(request: Request) {
     const iou = parseFloatField(formData.get("iou"), 0.7, 0.1, 0.95);
     const imgsz = parseFloatField(formData.get("imgsz"), 768, 300, 1200);
 
+    if (!(image instanceof File)) {
+      return NextResponse.json({ error: "File image wajib diisi." }, { status: 400 });
+    }
+
     const bytes = await image.arrayBuffer();
     const base64Str = Buffer.from(bytes).toString("base64");
 
