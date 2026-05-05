@@ -388,7 +388,9 @@ export default function Home() {
 
     if (result.annotatedImage) {
       const imgData = result.annotatedImage;
-      const ratio = result.imageHeight / result.imageWidth;
+      const iW = result.imageWidth || 800;
+      const iH = result.imageHeight || 800;
+      const ratio = iH / iW;
       const imgW = Math.min(W - 8, 164);
       const imgH = imgW * ratio;
       ensureSpace(imgH + 10);
@@ -401,7 +403,7 @@ export default function Home() {
       doc.setFontSize(7.5);
       doc.setFont("helvetica", "italic");
       tc(C.inkMut);
-      doc.text(`Resolusi asli: ${result.imageWidth} x ${result.imageHeight} px`, pw / 2, y, { align: "center" });
+      doc.text(`Resolusi asli: ${iW} x ${iH} px`, pw / 2, y, { align: "center" });
       y += 7;
     }
 
@@ -674,12 +676,15 @@ export default function Home() {
     doc.setLineWidth(0.3);
     doc.roundedRect(M, y, W, 36, 2, 2, "FD");
     y += 5;
-    kvRow("Model", result.modelPath.split(/[\\/]/).slice(-2).join("/"));
-    kvRow("Confidence Threshold", `${result.usedParams.conf}`);
-    kvRow("IoU NMS Threshold", `${result.usedParams.iou}`);
-    kvRow("Inference Image Size", `${result.usedParams.imgsz} px`);
-    kvRow("Resolusi Asli", `${result.imageWidth} x ${result.imageHeight} px`);
-    kvRow("Kelas Model", Object.entries(result.modelNames).map(([id, n]) => `${n} (${id})`).join(", ") || "-");
+    
+    const modelStr = result.modelPath ? result.modelPath.split(/[\\/]/).slice(-2).join("/") : "YOLOv8 (Hugging Face)";
+    
+    kvRow("Model", modelStr);
+    kvRow("Confidence Threshold", `${result.usedParams?.conf || "-"}`);
+    kvRow("IoU NMS Threshold", `${result.usedParams?.iou || "-"}`);
+    kvRow("Inference Image Size", `${result.usedParams?.imgsz || "-"} px`);
+    kvRow("Resolusi Asli", `${result.imageWidth || "-"} x ${result.imageHeight || "-"} px`);
+    kvRow("Kelas Model", Object.entries(result.modelNames || {}).map(([id, n]) => `${n} (${id})`).join(", ") || "-");
     y += 4;
 
     /* ====== ALL PAGES -- FOOTER ====== */

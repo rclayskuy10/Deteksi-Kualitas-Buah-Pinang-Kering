@@ -55,10 +55,14 @@ export async function POST(request: Request) {
       detections: parsedData.detections || [],
       classCounts: parsedData.classCounts || {},
       modelNames: parsedData.modelNames || {},
+      imageWidth: parsedData.imageWidth || 800,
+      imageHeight: parsedData.imageHeight || 800,
+      modelPath: parsedData.modelPath || "salbiyah/pinang-api (YOLOv8)",
       annotatedImage,
       usedParams: {
         conf,
         iou,
+        imgsz,
       },
     });
   } catch (error: any) {
