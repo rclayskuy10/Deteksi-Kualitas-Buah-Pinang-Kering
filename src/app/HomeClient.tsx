@@ -296,7 +296,11 @@ export default function Home() {
     try {
       setError("");
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
+        video: { 
+          facingMode: "environment",
+          width: { ideal: 1280 }, // Memaksa resolusi webcam lebih tinggi (seperti HD 720p)
+          height: { ideal: 720 },
+        },
         audio: false,
       });
       streamRef.current = stream;
