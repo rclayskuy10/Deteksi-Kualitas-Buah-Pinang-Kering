@@ -68,14 +68,20 @@ export default function Home() {
   const [conf, setConf] = useState("0.25");
   const [iou, setIou] = useState("0.70");
   const [imgsz, setImgsz] = useState("768");
-  const [realtimeEveryMs, setRealtimeEveryMs] = useState("1000");
+  const [realtimeEveryMs, setRealtimeEveryMs] = useState("300");
 
   /* Refs */
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const timerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isSendingRef = useRef(false);
+  const paramsRef = useRef({ conf, iou, imgsz });
+
+  useEffect(() => {
+    paramsRef.current = { conf, iou, imgsz };
+  }, [conf, iou, imgsz]);
 
   /* Computed */
   const detectionCount = result?.detections.length ?? 0;
@@ -144,12 +150,13 @@ export default function Home() {
   };
 
   /* ─── Inference ─── */
-  const inferFromBlob = async (blob: Blob) => {
+  const inferFromBlob = async (blob: Blob, isRealtime = false) => {
     const fd = new FormData();
     fd.append("image", blob, "frame.jpg");
-    fd.append("conf", conf);
-    fd.append("iou", iou);
-    fd.append("imgsz", imgsz);
+    // Use latest params from ref for realtime
+    fd.append("conf", isRealtime ? paramsRef.current.conf : conf);
+    fd.append("iou", isRealtime ? paramsRef.current.iou : iou);
+    fd.append("imgsz", isRealtime ? paramsRef.current.imgsz : imgsz);
 
     const res = await fetch(predictEndpoint, { method: "POST", body: fd });
     if (!res.ok) {
@@ -160,20 +167,84 @@ export default function Home() {
     const payload = (await res.json()) as PredictResponse;
     setResult(payload);
 
-    /* Add to history */
-    setHistory((prev) => {
-      const entry: HistoryEntry = {
-        id: crypto.randomUUID(),
-        thumbnail: payload.annotatedImage,
-        count: payload.detections.length,
-        timestamp: Date.now(),
-        result: payload,
-      };
-      return [entry, ...prev].slice(0, 20);
+    if (isRealtime) {
+      // Draw realtime boxes directly on the overlay canvas overlaying the video
+      drawOverlay(payload.detections);
+    } else {
+      /* Add to history */
+      setHistory((prev) => {
+        const entry: HistoryEntry = {
+          id: crypto.randomUUID(),
+          thumbnail: payload.annotatedImage,
+          count: payload.detections.length,
+          timestamp: Date.now(),
+          result: payload,
+        };
+        return [entry, ...prev].slice(0, 20);
+      });
+    }
+  };
+
+  const drawOverlay = (detections: Detection[]) => {
+    const canvas = overlayCanvasRef.current;
+    const video = videoRef.current;
+    if (!canvas || !video || video.videoWidth === 0) return;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    detections.forEach((det) => {
+      const x = det.box.x1;
+      const y = det.box.y1;
+      const w = det.box.x2 - det.box.x1;
+      const h = det.box.y2 - det.box.y1;
+
+      ctx.strokeStyle = "#10b981"; // Tailwind green-500
+      ctx.lineWidth = 4;
+      ctx.strokeRect(x, y, w, h);
+
+      ctx.fillStyle = "#10b981";
+      const label = `${det.className} ${Math.round(det.confidence * 100)}%`;
+      ctx.font = "bold 16px sans-serif";
+      const textWidth = ctx.measureText(label).width;
+
+      ctx.fillRect(x, y - 24, textWidth + 10, 24);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(label, x + 5, y - 6);
     });
   };
 
   /* ─── Webcam ─── */
+  const captureAndInferRealtime = async () => {
+    if (isSendingRef.current || !videoRef.current || !canvasRef.current) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (video.videoWidth === 0 || video.videoHeight === 0) return;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    isSendingRef.current = true;
+    try {
+      const blob = await new Promise<Blob | null>((r) =>
+        canvas.toBlob((v) => r(v), "image/jpeg", 0.92),
+      );
+      if (!blob) throw new Error("Gagal mengambil frame.");
+      await inferFromBlob(blob, true);
+    } catch (err) {
+      console.error(err);
+      // We don't block the UI with errors on realtime frames, just log it
+    } finally {
+      isSendingRef.current = false;
+    }
+  };
+
   const captureAndInfer = async () => {
     if (isSendingRef.current || !videoRef.current || !canvasRef.current) return;
     const video = videoRef.current;
@@ -193,7 +264,7 @@ export default function Home() {
         canvas.toBlob((v) => r(v), "image/jpeg", 0.92),
       );
       if (!blob) throw new Error("Gagal mengambil frame.");
-      await inferFromBlob(blob);
+      await inferFromBlob(blob, false);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Gagal memproses frame.");
@@ -235,10 +306,10 @@ export default function Home() {
       }
       setCameraReady(true);
       setStreaming(true);
-      await captureAndInfer();
+      await captureAndInferRealtime();
       const ms = Number.parseInt(realtimeEveryMs, 10);
-      const safe = Number.isNaN(ms) ? 1000 : Math.max(500, Math.min(5000, ms));
-      timerRef.current = window.setInterval(() => void captureAndInfer(), safe);
+      const safe = Number.isNaN(ms) ? 1000 : Math.max(200, Math.min(5000, ms));
+      timerRef.current = window.setInterval(() => void captureAndInferRealtime(), safe);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Tidak dapat mengakses kamera.");
       stopRealtime();
@@ -892,7 +963,7 @@ export default function Home() {
                       hint="Jeda waktu antar-frame pada mode realtime. 1000ms = 1 frame per detik."
                       label="Interval"
                       max={5000}
-                      min={500}
+                      min={200}
                       onChange={setRealtimeEveryMs}
                       step={100}
                       unit="ms"
@@ -954,7 +1025,7 @@ export default function Home() {
                     {streaming ? " — deteksi berjalan" : ""}
                   </p>
                   <div className={styles.mediaFrame}>
-                    {loading && (
+                    {loading && !streaming && (
                       <div className={styles.processing}>
                         <div className={styles.processingSpinner} />
                         <p className={styles.processingText}>Processing frame...</p>
@@ -967,6 +1038,12 @@ export default function Home() {
                       playsInline
                       ref={videoRef}
                     />
+                    {streaming && (
+                      <canvas
+                        className={styles.overlayCanvas}
+                        ref={overlayCanvasRef}
+                      />
+                    )}
                   </div>
                   <canvas className={styles.hiddenCanvas} ref={canvasRef} />
                 </div>
