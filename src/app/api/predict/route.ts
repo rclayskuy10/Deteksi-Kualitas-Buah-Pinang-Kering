@@ -32,7 +32,7 @@ export async function POST(request: Request) {
     const imgsz = parseFloatField(formData.get("imgsz"), 768, 300, 1200);
     const lite = formData.get("lite") === "1";
 
-    if (!(image instanceof File)) {
+    if (!(image instanceof Blob)) {
       return NextResponse.json({ error: "File image wajib diisi." }, { status: 400 });
     }
 

@@ -63,7 +63,10 @@ function getObjectFitRect(
   };
 }
 
-const REALTIME_JPEG_QUALITY = 0.94;
+const REALTIME_JPEG_QUALITY = 0.95;
+/** Crop tengah frame webcam — biji terlihat lebih besar seperti foto upload. */
+const REALTIME_CENTER_CROP = 0.72;
+const VIDEO_READY_TIMEOUT_MS = 5000;
 
 /* ─── Component ─── */
 
@@ -88,13 +91,13 @@ export default function Home() {
   const [iou, setIou] = useState("0.70");
   const [imgsz, setImgsz] = useState("768");
   const [realtimeEveryMs, setRealtimeEveryMs] = useState("600");
+  const [realtimeStatus, setRealtimeStatus] = useState("");
 
   /* Refs */
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const imageCaptureRef = useRef<{ grabFrame: () => Promise<ImageBitmap> } | null>(null);
   const isSendingRef = useRef(false);
   const streamingRef = useRef(false);
   const realtimeReqIdRef = useRef(0);
@@ -171,14 +174,28 @@ export default function Home() {
     if (dropped?.type.startsWith("image/")) handleFile(dropped);
   };
 
+  const toImageFile = (blob: Blob, filename: string) =>
+    blob instanceof File
+      ? blob
+      : new File([blob], filename, {
+          type: blob.type || "image/jpeg",
+          lastModified: Date.now(),
+        });
+
   /* ─── Inference ─── */
-  const inferFromBlob = async (blob: Blob, isRealtime = false, requestId = 0) => {
+  const inferFromBlob = async (
+    blob: Blob,
+    isRealtime = false,
+    requestId = 0,
+    options?: { lite?: boolean },
+  ) => {
+    const useLite = options?.lite ?? isRealtime;
     const fd = new FormData();
-    fd.append("image", blob, isRealtime ? "frame.jpg" : "image.jpg");
+    fd.append("image", toImageFile(blob, isRealtime ? "frame.jpg" : "image.jpg"));
     fd.append("conf", isRealtime ? paramsRef.current.conf : conf);
     fd.append("iou", isRealtime ? paramsRef.current.iou : iou);
     fd.append("imgsz", isRealtime ? paramsRef.current.imgsz : imgsz);
-    if (isRealtime) fd.append("lite", "1");
+    if (useLite) fd.append("lite", "1");
 
     const res = await fetch(predictEndpoint, { method: "POST", body: fd });
     if (!res.ok) {
@@ -207,6 +224,14 @@ export default function Home() {
         payload.imageWidth || lastCaptureSizeRef.current.width,
         payload.imageHeight || lastCaptureSizeRef.current.height,
       );
+
+      const count = payload.detections.length;
+      setRealtimeStatus(
+        count > 0
+          ? `${count} objek terdeteksi (frame terakhir)`
+          : "Frame terkirim — belum ada objek. Dekatkan biji ke tengah kamera.",
+      );
+      setError("");
       return;
     }
 
@@ -271,36 +296,47 @@ export default function Home() {
     });
   };
 
-  const captureFrameToCanvas = async () => {
+  const waitForVideoReady = async (video: HTMLVideoElement) => {
+    const started = Date.now();
+    while (video.videoWidth === 0 || video.videoHeight === 0) {
+      if (Date.now() - started > VIDEO_READY_TIMEOUT_MS) {
+        throw new Error("Kamera belum siap. Tunggu beberapa detik lalu coba lagi.");
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 80));
+    }
+  };
+
+  /** Ambil frame dari elemen video (sama dengan preview) + crop tengah agar biji lebih besar. */
+  const captureFrameToCanvas = async (centerCrop = false) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || video.videoWidth === 0 || video.videoHeight === 0) {
-      return null;
-    }
+    if (!video || !canvas) return null;
 
+    await waitForVideoReady(video);
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
 
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
 
-    try {
-      const capture = imageCaptureRef.current;
-      if (capture) {
-        const frame = await capture.grabFrame();
-        canvas.width = frame.width;
-        canvas.height = frame.height;
-        ctx.drawImage(frame, 0, 0);
-        frame.close?.();
-      } else {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      }
-    } catch (err) {
-      console.warn("Realtime capture fallback:", err);
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    if (centerCrop) {
+      const ratio = REALTIME_CENTER_CROP;
+      const cw = Math.max(1, Math.round(vw * ratio));
+      const ch = Math.max(1, Math.round(vh * ratio));
+      const sx = Math.floor((vw - cw) / 2);
+      const sy = Math.floor((vh - ch) / 2);
+      canvas.width = cw;
+      canvas.height = ch;
+      ctx.filter = "contrast(1.1) brightness(1.06) saturate(1.05)";
+      ctx.drawImage(video, sx, sy, cw, ch, 0, 0, cw, ch);
+      ctx.filter = "none";
+    } else {
+      canvas.width = vw;
+      canvas.height = vh;
+      ctx.drawImage(video, 0, 0, vw, vh);
     }
 
     lastCaptureSizeRef.current = { width: canvas.width, height: canvas.height };
@@ -311,21 +347,57 @@ export default function Home() {
   const captureAndInferRealtime = async () => {
     if (isSendingRef.current || !streamingRef.current) return;
 
-    const canvas = await captureFrameToCanvas();
-    if (!canvas) return;
+    const canvas = await captureFrameToCanvas(true);
+    if (!canvas) {
+      setRealtimeStatus("Gagal mengambil frame — pastikan webcam aktif.");
+      return;
+    }
 
     const requestId = ++realtimeReqIdRef.current;
     isSendingRef.current = true;
+    setRealtimeStatus("Mengirim frame ke model...");
     try {
       const blob = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob((value) => resolve(value), "image/jpeg", REALTIME_JPEG_QUALITY),
       );
-      if (!blob) throw new Error("Gagal mengambil frame.");
+      if (!blob || blob.size < 1024) {
+        throw new Error("Frame kamera kosong atau terlalu kecil.");
+      }
       await inferFromBlob(blob, true, requestId);
     } catch (err) {
+      const msg = err instanceof Error ? err.message : "Gagal memproses frame realtime.";
+      setError(msg);
+      setRealtimeStatus(msg);
       console.error(err);
     } finally {
       isSendingRef.current = false;
+    }
+  };
+
+  /** Satu frame dengan hasil penuh (sama seperti upload) — untuk uji akurasi webcam. */
+  const captureSingleFrameDetect = async () => {
+    if (isSendingRef.current || !cameraReady) return;
+    isSendingRef.current = true;
+    setLoading(true);
+    setError("");
+    setRealtimeStatus("Menganalisis satu frame (mode kualitas penuh)...");
+    try {
+      const canvas = await captureFrameToCanvas(true);
+      if (!canvas) throw new Error("Kamera belum siap.");
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob((value) => resolve(value), "image/jpeg", 0.98),
+      );
+      if (!blob) throw new Error("Gagal mengambil frame.");
+      await inferFromBlob(blob, false, 0, { lite: false });
+      setRealtimeStatus("Selesai — lihat hasil beranotasi di panel Output.");
+      setError("");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Gagal mendeteksi frame.";
+      setError(msg);
+      setRealtimeStatus(msg);
+    } finally {
+      isSendingRef.current = false;
+      setLoading(false);
     }
   };
 
@@ -358,8 +430,8 @@ export default function Home() {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
-    imageCaptureRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
+    setRealtimeStatus("");
     const overlay = overlayCanvasRef.current;
     if (overlay) {
       const ctx = overlay.getContext("2d");
@@ -390,42 +462,29 @@ export default function Home() {
     try {
       setError("");
       setResult(null);
+      setRealtimeStatus("Membuka kamera...");
+      realtimeReqIdRef.current = 0;
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: { ideal: "environment" },
           width: { ideal: 1280, min: 640 },
           height: { ideal: 720, min: 480 },
+          facingMode: { ideal: "environment" },
         },
         audio: false,
       });
       streamRef.current = stream;
-      const track = stream.getVideoTracks()[0];
-      if (track && typeof ImageCapture !== "undefined") {
-        imageCaptureRef.current = new ImageCapture(track) as unknown as {
-          grabFrame: () => Promise<ImageBitmap>;
-        };
-      } else {
-        imageCaptureRef.current = null;
-      }
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
-        await new Promise<void>((resolve) => {
-          const video = videoRef.current;
-          if (!video) {
-            resolve();
-            return;
-          }
-          if (video.videoWidth > 0) {
-            resolve();
-            return;
-          }
-          video.onloadeddata = () => resolve();
-        });
+        await waitForVideoReady(videoRef.current);
       }
       setCameraReady(true);
       setStreaming(true);
       streamingRef.current = true;
+      setRealtimeStatus(
+        "Kamera aktif. Letakkan biji di tengah frame — area tengah yang dianalisis.",
+      );
       void runRealtimeLoop();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Tidak dapat mengakses kamera.");
@@ -1113,6 +1172,14 @@ export default function Home() {
                     >
                       ⏹ Stop
                     </button>
+                    <button
+                      className={styles.btnSecondary}
+                      disabled={!cameraReady || loading}
+                      onClick={() => void captureSingleFrameDetect()}
+                      type="button"
+                    >
+                      📸 Deteksi 1 Frame
+                    </button>
                   </div>
                 )}
 
@@ -1141,6 +1208,9 @@ export default function Home() {
                     Webcam {cameraReady ? "aktif" : "belum aktif"}
                     {streaming ? " — deteksi berjalan" : ""}
                   </p>
+                  {realtimeStatus && (
+                    <p className={styles.realtimeHint}>{realtimeStatus}</p>
+                  )}
                   <div className={styles.mediaFrame}>
                     {loading && !streaming && (
                       <div className={styles.processing}>
@@ -1156,10 +1226,20 @@ export default function Home() {
                       ref={videoRef}
                     />
                     {streaming && (
-                      <canvas
-                        className={styles.overlayCanvas}
-                        ref={overlayCanvasRef}
-                      />
+                      <>
+                        <div
+                          aria-hidden
+                          className={styles.cropGuide}
+                          style={{
+                            width: `${REALTIME_CENTER_CROP * 100}%`,
+                            height: `${REALTIME_CENTER_CROP * 100}%`,
+                          }}
+                        />
+                        <canvas
+                          className={styles.overlayCanvas}
+                          ref={overlayCanvasRef}
+                        />
+                      </>
                     )}
                   </div>
                   <canvas className={styles.hiddenCanvas} ref={canvasRef} />
