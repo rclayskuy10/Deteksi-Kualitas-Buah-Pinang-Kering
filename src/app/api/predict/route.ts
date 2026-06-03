@@ -3,6 +3,18 @@ import { Client } from "@gradio/client";
 
 export const runtime = "nodejs";
 
+let gradioClientPromise: Promise<Client> | null = null;
+
+function getGradioClient() {
+  if (!gradioClientPromise) {
+    gradioClientPromise = Client.connect("salbiyah/pinang-api").catch((err) => {
+      gradioClientPromise = null;
+      throw err;
+    });
+  }
+  return gradioClientPromise;
+}
+
 function parseFloatField(value: FormDataEntryValue | null, fallback: number, min: number, max: number) {
   const parsed = Number.parseFloat(String(value ?? ""));
   if (Number.isNaN(parsed)) {
@@ -18,6 +30,7 @@ export async function POST(request: Request) {
     const conf = parseFloatField(formData.get("conf"), 0.25, 0.01, 0.99);
     const iou = parseFloatField(formData.get("iou"), 0.7, 0.1, 0.95);
     const imgsz = parseFloatField(formData.get("imgsz"), 768, 300, 1200);
+    const lite = formData.get("lite") === "1";
 
     if (!(image instanceof File)) {
       return NextResponse.json({ error: "File image wajib diisi." }, { status: 400 });
@@ -26,8 +39,7 @@ export async function POST(request: Request) {
     const bytes = await image.arrayBuffer();
     const base64Str = Buffer.from(bytes).toString("base64");
 
-    // Sambung ke Hugging Face Space
-    const app = await Client.connect("salbiyah/pinang-api");
+    const app = await getGradioClient();
 
     // Kirim request ke Space endpoint baru (/predict_api)
     // app.py: inputs=[gr.Textbox(base64Str), gr.Number(conf), gr.Number(iou), gr.Number(imgsz)]
@@ -49,7 +61,9 @@ export async function POST(request: Request) {
        throw new Error(`[Python Error] ${parsedData.python_error}\nTrace: ${parsedData.trace}`);
     }
 
-    const annotatedImage = `data:image/jpeg;base64,${parsedData.image_base64}`;
+    const annotatedImage = parsedData.image_base64
+      ? `data:image/jpeg;base64,${parsedData.image_base64}`
+      : "";
 
     return NextResponse.json({
       detections: parsedData.detections || [],
@@ -58,7 +72,7 @@ export async function POST(request: Request) {
       imageWidth: parsedData.imageWidth || 800,
       imageHeight: parsedData.imageHeight || 800,
       modelPath: parsedData.modelPath || "salbiyah/pinang-api (YOLOv8)",
-      annotatedImage,
+      ...(lite ? {} : { annotatedImage }),
       usedParams: {
         conf,
         iou,

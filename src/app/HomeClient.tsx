@@ -46,6 +46,25 @@ type HistoryEntry = {
   result: PredictResponse;
 };
 
+/** Letterbox rect for object-fit: contain (video preview + overlay alignment). */
+function getObjectFitRect(
+  containerW: number,
+  containerH: number,
+  contentW: number,
+  contentH: number,
+) {
+  const scale = Math.min(containerW / contentW, containerH / contentH);
+  const width = contentW * scale;
+  const height = contentH * scale;
+  return {
+    scale,
+    offsetX: (containerW - width) / 2,
+    offsetY: (containerH - height) / 2,
+  };
+}
+
+const REALTIME_JPEG_QUALITY = 0.94;
+
 /* ─── Component ─── */
 
 export default function Home() {
@@ -68,16 +87,19 @@ export default function Home() {
   const [conf, setConf] = useState("0.25");
   const [iou, setIou] = useState("0.70");
   const [imgsz, setImgsz] = useState("768");
-  const [realtimeEveryMs, setRealtimeEveryMs] = useState("300");
+  const [realtimeEveryMs, setRealtimeEveryMs] = useState("600");
 
   /* Refs */
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const timerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const imageCaptureRef = useRef<{ grabFrame: () => Promise<ImageBitmap> } | null>(null);
   const isSendingRef = useRef(false);
+  const streamingRef = useRef(false);
+  const realtimeReqIdRef = useRef(0);
   const paramsRef = useRef({ conf, iou, imgsz });
+  const lastCaptureSizeRef = useRef({ width: 0, height: 0 });
 
   useEffect(() => {
     paramsRef.current = { conf, iou, imgsz };
@@ -150,13 +172,13 @@ export default function Home() {
   };
 
   /* ─── Inference ─── */
-  const inferFromBlob = async (blob: Blob, isRealtime = false) => {
+  const inferFromBlob = async (blob: Blob, isRealtime = false, requestId = 0) => {
     const fd = new FormData();
-    fd.append("image", blob, "frame.jpg");
-    // Use latest params from ref for realtime
+    fd.append("image", blob, isRealtime ? "frame.jpg" : "image.jpg");
     fd.append("conf", isRealtime ? paramsRef.current.conf : conf);
     fd.append("iou", isRealtime ? paramsRef.current.iou : iou);
     fd.append("imgsz", isRealtime ? paramsRef.current.imgsz : imgsz);
+    if (isRealtime) fd.append("lite", "1");
 
     const res = await fetch(predictEndpoint, { method: "POST", body: fd });
     if (!res.ok) {
@@ -165,103 +187,158 @@ export default function Home() {
     }
 
     const payload = (await res.json()) as PredictResponse;
-    setResult(payload);
 
     if (isRealtime) {
-      // Draw realtime boxes directly on the overlay canvas overlaying the video
-      drawOverlay(payload.detections);
-    } else {
-      /* Add to history */
-      setHistory((prev) => {
-        const entry: HistoryEntry = {
-          id: crypto.randomUUID(),
-          thumbnail: payload.annotatedImage,
-          count: payload.detections.length,
-          timestamp: Date.now(),
-          result: payload,
-        };
-        return [entry, ...prev].slice(0, 20);
-      });
+      if (!streamingRef.current || requestId !== realtimeReqIdRef.current) return;
+
+      setResult((prev) => ({
+        detections: payload.detections,
+        classCounts: payload.classCounts,
+        modelNames: payload.modelNames,
+        imageWidth: payload.imageWidth,
+        imageHeight: payload.imageHeight,
+        modelPath: payload.modelPath,
+        usedParams: payload.usedParams,
+        annotatedImage: prev?.annotatedImage ?? "",
+      }));
+
+      drawOverlay(
+        payload.detections,
+        payload.imageWidth || lastCaptureSizeRef.current.width,
+        payload.imageHeight || lastCaptureSizeRef.current.height,
+      );
+      return;
     }
+
+    setResult(payload);
+    setHistory((prev) => {
+      const entry: HistoryEntry = {
+        id: crypto.randomUUID(),
+        thumbnail: payload.annotatedImage,
+        count: payload.detections.length,
+        timestamp: Date.now(),
+        result: payload,
+      };
+      return [entry, ...prev].slice(0, 20);
+    });
   };
 
-  const drawOverlay = (detections: Detection[]) => {
+  const drawOverlay = (
+    detections: Detection[],
+    sourceWidth: number,
+    sourceHeight: number,
+  ) => {
     const canvas = overlayCanvasRef.current;
     const video = videoRef.current;
-    if (!canvas || !video || video.videoWidth === 0) return;
+    if (!canvas || !video || video.videoWidth === 0 || !sourceWidth || !sourceHeight) return;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    const displayWidth = video.clientWidth;
+    const displayHeight = video.clientHeight;
+    if (!displayWidth || !displayHeight) return;
+
+    canvas.width = displayWidth;
+    canvas.height = displayHeight;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    detections.forEach((det) => {
-      const x = det.box.x1;
-      const y = det.box.y1;
-      const w = det.box.x2 - det.box.x1;
-      const h = det.box.y2 - det.box.y1;
+    const { scale, offsetX, offsetY } = getObjectFitRect(
+      displayWidth,
+      displayHeight,
+      sourceWidth,
+      sourceHeight,
+    );
 
-      ctx.strokeStyle = "#10b981"; // Tailwind green-500
-      ctx.lineWidth = 4;
+    detections.forEach((det) => {
+      const x = offsetX + det.box.x1 * scale;
+      const y = offsetY + det.box.y1 * scale;
+      const w = (det.box.x2 - det.box.x1) * scale;
+      const h = (det.box.y2 - det.box.y1) * scale;
+
+      ctx.strokeStyle = "#10b981";
+      ctx.lineWidth = 3;
       ctx.strokeRect(x, y, w, h);
 
       ctx.fillStyle = "#10b981";
       const label = `${det.className} ${Math.round(det.confidence * 100)}%`;
-      ctx.font = "bold 16px sans-serif";
+      ctx.font = "bold 14px sans-serif";
       const textWidth = ctx.measureText(label).width;
+      const labelY = Math.max(y, 22);
 
-      ctx.fillRect(x, y - 24, textWidth + 10, 24);
+      ctx.fillRect(x, labelY - 22, textWidth + 10, 22);
       ctx.fillStyle = "#ffffff";
-      ctx.fillText(label, x + 5, y - 6);
+      ctx.fillText(label, x + 5, labelY - 6);
     });
+  };
+
+  const captureFrameToCanvas = async () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || video.videoWidth === 0 || video.videoHeight === 0) {
+      return null;
+    }
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    ctx.imageSmoothingEnabled = false;
+
+    try {
+      const capture = imageCaptureRef.current;
+      if (capture) {
+        const frame = await capture.grabFrame();
+        canvas.width = frame.width;
+        canvas.height = frame.height;
+        ctx.drawImage(frame, 0, 0);
+        frame.close?.();
+      } else {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      }
+    } catch (err) {
+      console.warn("Realtime capture fallback:", err);
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    }
+
+    lastCaptureSizeRef.current = { width: canvas.width, height: canvas.height };
+    return canvas;
   };
 
   /* ─── Webcam ─── */
   const captureAndInferRealtime = async () => {
-    if (isSendingRef.current || !videoRef.current || !canvasRef.current) return;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (video.videoWidth === 0 || video.videoHeight === 0) return;
+    if (isSendingRef.current || !streamingRef.current) return;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const canvas = await captureFrameToCanvas();
+    if (!canvas) return;
 
+    const requestId = ++realtimeReqIdRef.current;
     isSendingRef.current = true;
     try {
-      const blob = await new Promise<Blob | null>((r) =>
-        canvas.toBlob((v) => r(v), "image/jpeg", 0.92),
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob((value) => resolve(value), "image/jpeg", REALTIME_JPEG_QUALITY),
       );
       if (!blob) throw new Error("Gagal mengambil frame.");
-      await inferFromBlob(blob, true);
+      await inferFromBlob(blob, true, requestId);
     } catch (err) {
       console.error(err);
-      // We don't block the UI with errors on realtime frames, just log it
     } finally {
       isSendingRef.current = false;
     }
   };
 
   const captureAndInfer = async () => {
-    if (isSendingRef.current || !videoRef.current || !canvasRef.current) return;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (video.videoWidth === 0 || video.videoHeight === 0) return;
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    if (isSendingRef.current) return;
 
     isSendingRef.current = true;
     setLoading(true);
     try {
-      const blob = await new Promise<Blob | null>((r) =>
-        canvas.toBlob((v) => r(v), "image/jpeg", 0.92),
+      const canvas = await captureFrameToCanvas();
+      if (!canvas) throw new Error("Kamera belum siap.");
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob((value) => resolve(value), "image/jpeg", REALTIME_JPEG_QUALITY),
       );
       if (!blob) throw new Error("Gagal mengambil frame.");
       await inferFromBlob(blob, false);
@@ -275,17 +352,34 @@ export default function Home() {
   };
 
   const stopRealtime = () => {
-    if (timerRef.current !== null) {
-      window.clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
+    streamingRef.current = false;
+    realtimeReqIdRef.current += 1;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
+    imageCaptureRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
+    const overlay = overlayCanvasRef.current;
+    if (overlay) {
+      const ctx = overlay.getContext("2d");
+      ctx?.clearRect(0, 0, overlay.width, overlay.height);
+    }
     setCameraReady(false);
     setStreaming(false);
+  };
+
+  const runRealtimeLoop = async () => {
+    const gapMs = () => {
+      const ms = Number.parseInt(realtimeEveryMs, 10);
+      return Number.isNaN(ms) ? 600 : Math.max(300, Math.min(5000, ms));
+    };
+
+    while (streamingRef.current) {
+      await captureAndInferRealtime();
+      if (!streamingRef.current) break;
+      await new Promise((resolve) => window.setTimeout(resolve, gapMs()));
+    }
   };
 
   const startRealtime = async () => {
@@ -295,25 +389,44 @@ export default function Home() {
     }
     try {
       setError("");
+      setResult(null);
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { 
-          facingMode: "environment",
-          width: { ideal: 1280 }, // Memaksa resolusi webcam lebih tinggi (seperti HD 720p)
-          height: { ideal: 720 },
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280, min: 640 },
+          height: { ideal: 720, min: 480 },
         },
         audio: false,
       });
       streamRef.current = stream;
+      const track = stream.getVideoTracks()[0];
+      if (track && typeof ImageCapture !== "undefined") {
+        imageCaptureRef.current = new ImageCapture(track) as unknown as {
+          grabFrame: () => Promise<ImageBitmap>;
+        };
+      } else {
+        imageCaptureRef.current = null;
+      }
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
+        await new Promise<void>((resolve) => {
+          const video = videoRef.current;
+          if (!video) {
+            resolve();
+            return;
+          }
+          if (video.videoWidth > 0) {
+            resolve();
+            return;
+          }
+          video.onloadeddata = () => resolve();
+        });
       }
       setCameraReady(true);
       setStreaming(true);
-      await captureAndInferRealtime();
-      const ms = Number.parseInt(realtimeEveryMs, 10);
-      const safe = Number.isNaN(ms) ? 1000 : Math.max(200, Math.min(5000, ms));
-      timerRef.current = window.setInterval(() => void captureAndInferRealtime(), safe);
+      streamingRef.current = true;
+      void runRealtimeLoop();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Tidak dapat mengakses kamera.");
       stopRealtime();
@@ -1090,6 +1203,11 @@ export default function Home() {
                     </button>
                   </div>
                 </>
+              ) : streaming && result && result.detections.length > 0 ? (
+                <div className={styles.placeholder}>
+                  <span className={styles.placeholderIcon}>📹</span>
+                  Kotak deteksi ditampilkan langsung di preview webcam. Gunakan mode upload untuk gambar beranotasi penuh.
+                </div>
               ) : (
                 <div className={styles.placeholder}>
                   <span className={styles.placeholderIcon}>🔍</span>
