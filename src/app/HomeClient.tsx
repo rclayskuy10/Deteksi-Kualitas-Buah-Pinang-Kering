@@ -1024,9 +1024,9 @@ export default function Home() {
           <div className={styles.heroContent}>
             <div className={styles.heroLeft}>
               <span className={styles.badge}>YOLOv8 Engine</span>
-              <h1 className={styles.heroTitle}>Object Detection Workspace</h1>
+              <h1 className={styles.heroTitle}>Deteksi Kualitas Biji Pinang Kering Menggunakan YOLOv8m berbasis Web</h1>
               <p className={styles.heroDesc}>
-                Analisis gambar dan monitoring realtime dengan YOLOv8.
+                Analisis gambar dan monitoring realtime dengan YOLOv8m.
                 Siap untuk riset, demo, dan production.
               </p>
             </div>
